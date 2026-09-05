@@ -6,7 +6,7 @@ on:
   pull_request:
     types: [labeled]
   workflow_run:
-    workflows: [CI]
+    workflows: [CI, Path Guard]
     types: [completed]
 
 permissions:
@@ -374,6 +374,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          CI_WORKFLOW: ${{ github.event.workflow_run.name }}
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "$AF2_EXPECTED_REPOSITORY"
@@ -401,10 +402,10 @@ jobs:
             af2/issue-*) ;;
             *) echo "AF2 auto label is on an unexpected branch; refuse repair." >&2; exit 1 ;;
           esac
-          if [ "$CI_CONCLUSION" != "failure" ]; then
+          if [ "$CI_WORKFLOW" != "CI" ] || [ "$CI_CONCLUSION" != "failure" ]; then
             gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" --disable-auto || true
             gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --add-label af2:blocked
-            gh pr comment "$pr" --repo "$GITHUB_REPOSITORY" --body "AF2 CI ended with conclusion '$CI_CONCLUSION' (not a deterministic failure). Auto-merge disabled; PR blocked; owner recovery required. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            gh pr comment "$pr" --repo "$GITHUB_REPOSITORY" --body "AF2 required workflow '$CI_WORKFLOW' ended with conclusion '$CI_CONCLUSION' (only a deterministic CI failure is repairable). Auto-merge disabled; PR blocked; owner recovery required. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             exit 0
           fi
           current="$(echo "$labels" | jq -r '[.[] | select(startswith("af2:attempt-"))][0] // "af2:attempt-1"' | sed 's/.*-//')"
@@ -583,3 +584,38 @@ jobs:
           gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label af2:repair --add-label af2:blocked || true
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "AF2 $attempt repair did not complete (facts=$FACTS_OUTCOME, claude=$CLAUDE_OUTCOME, recheck=$RECHECK_OUTCOME). Auto-merge disabled; PR blocked; owner recovery required. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
           exit 1
+
+  cleanup-repair:
+    name: Clean up after a failed, cancelled, or timed-out repair
+    needs: repair
+    if: always() && github.event_name == 'pull_request' && needs.repair.result != 'success' && needs.repair.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Mint repository-scoped App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.AF2_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AF2_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Block the PR if the in-job handler did not
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPAIR_RESULT: ${{ needs.repair.result }}
+        run: |
+          set -uo pipefail
+          test "$GITHUB_REPOSITORY" = "$AF2_EXPECTED_REPOSITORY" || exit 1
+          labels="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name]' 2>/dev/null || echo '[]')"
+          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --disable-auto || true
+          if echo "$labels" | jq -e 'index("af2:blocked") != null' >/dev/null; then
+            echo "PR #$PR_NUMBER already blocked by the in-job handler; auto-merge disabled again for safety."
+            exit 0
+          fi
+          gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label af2:repair --add-label af2:blocked || true
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "AF2 repair job ended with result '$REPAIR_RESULT' before its own cleanup could run (failed, cancelled, or timed out). Auto-merge disabled; PR blocked; owner recovery required. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
