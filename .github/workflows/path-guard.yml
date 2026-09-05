@@ -47,6 +47,7 @@ jobs:
           test "${#changed_paths[@]}" -gt 0
           for path in "${changed_paths[@]}"; do
             case "$path" in
+              docs/OPERATING.md) echo "Forbidden bot-authored path: $path" >&2; exit 1 ;;
               README.md|src/*|tests/*|docs/*) ;;
               *) echo "Forbidden bot-authored path: $path" >&2; exit 1 ;;
             esac

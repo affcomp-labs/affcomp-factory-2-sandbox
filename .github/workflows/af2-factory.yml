@@ -195,6 +195,7 @@ jobs:
           for path in "${changed_paths[@]}"; do
             printf '%q\n' "$path" >> "$RUNNER_TEMP/af2-changed-paths.txt"
             case "$path" in
+              docs/OPERATING.md) fail_guard "Forbidden R0/R1 path: $path" ;;
               README.md|src/*|tests/*|docs/*) ;;
               *) fail_guard "Forbidden R0/R1 path: $path" ;;
             esac
@@ -343,6 +344,10 @@ jobs:
             echo "PR #$pr is not an AF2 autonomous PR; no repair scheduled."
             exit 0
           fi
+          if echo "$labels" | jq -e 'index("af2:blocked") != null' >/dev/null; then
+            echo "PR #$pr is af2:blocked; owner recovery required; no repair scheduled."
+            exit 0
+          fi
           test "$(echo "$pr_data" | jq -r '.headRepository.nameWithOwner')" = "$GITHUB_REPOSITORY"
           case "$(echo "$pr_data" | jq -r '.headRefName')" in
             af2/issue-*) ;;
@@ -489,6 +494,7 @@ jobs:
           test "${#changed_paths[@]}" -gt 0
           for path in "${changed_paths[@]}"; do
             case "$path" in
+              docs/OPERATING.md) echo "Forbidden R0/R1 path: $path" >&2; exit 1 ;;
               README.md|src/*|tests/*|docs/*) ;;
               *) echo "Forbidden R0/R1 path: $path" >&2; exit 1 ;;
             esac

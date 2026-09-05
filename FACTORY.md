@@ -31,7 +31,7 @@ Every implementation prompt includes factory version, full repository and ID, ba
 
 ## Checks, merge, concurrency, and budgets
 
-Both `test` and `path-guard` are required checks. `path-guard` permits only `README.md`, `src/**`, `tests/**`, and `docs/**` on PRs authored by `AF2_BOT_LOGIN`; the Claude permission profile separately denies `docs/OPERATING.md`. Human-authored PRs pass the path check into the R2 owner-controlled lane. Squash is the only merge method. The factory and owner-dispatched revert workflow may enable native auto-merge for bot-authored PRs; human-authored PRs are never auto-merged. “Require branches to be up to date” and merge queue are off.
+Both `test` and `path-guard` are required checks. `path-guard` permits only `README.md`, `src/**`, `tests/**`, and `docs/**` other than `docs/OPERATING.md` on PRs authored by `AF2_BOT_LOGIN`; the start guard and the repair recheck apply the same allowlist, and the Claude permission profile additionally denies `docs/OPERATING.md` at tool level. A PR carrying `af2:blocked` is never scheduled for repair. Human-authored PRs pass the path check into the R2 owner-controlled lane. Squash is the only merge method. The factory and owner-dispatched revert workflow may enable native auto-merge for bot-authored PRs; human-authored PRs are never auto-merged. “Require branches to be up to date” and merge queue are off.
 
 Start jobs use concurrency group `af2-start`; repair jobs use `af2-repair-<PR number>`; repair scheduling is ungrouped. GitHub retains only the newest pending job in a concurrency group, so the owner waits until one start begins before applying `af2:ready` to the next issue.
 
