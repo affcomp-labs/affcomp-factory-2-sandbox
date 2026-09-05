@@ -1,0 +1,54 @@
+name: Path Guard
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  path-guard:
+    name: path-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require configured bot identity
+        shell: bash
+        env:
+          AF2_BOT_LOGIN: ${{ vars.AF2_BOT_LOGIN }}
+        run: |
+          set -euo pipefail
+          test -n "$AF2_BOT_LOGIN"
+
+      - name: Pass human-authored PR
+        if: github.event.pull_request.user.login != vars.AF2_BOT_LOGIN
+        run: echo "Human-authored PR; R2 policy and owner-controlled merge apply."
+
+      - name: Checkout bot-authored PR head
+        if: github.event.pull_request.user.login == vars.AF2_BOT_LOGIN
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Enforce bot path allowlist
+        if: github.event.pull_request.user.login == vars.AF2_BOT_LOGIN
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "$BASE_SHA^{commit}"
+          git cat-file -e "$HEAD_SHA^{commit}"
+          mapfile -d '' -t changed_paths < <(git diff --name-only -z "$BASE_SHA...$HEAD_SHA")
+          test "${#changed_paths[@]}" -gt 0
+          for path in "${changed_paths[@]}"; do
+            case "$path" in
+              docs/OPERATING.md) echo "Forbidden bot-authored path: $path" >&2; exit 1 ;;
+              README.md|src/*|tests/*|docs/*) ;;
+              *) echo "Forbidden bot-authored path: $path" >&2; exit 1 ;;
+            esac
+          done

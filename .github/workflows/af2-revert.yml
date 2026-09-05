@@ -1,0 +1,105 @@
+name: AF2 Revert
+
+on:
+  workflow_dispatch:
+    inputs:
+      merge_sha:
+        description: Full 40-character squash-merge SHA to revert
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  revert:
+    name: Open bounded revert PR
+    if: github.actor == vars.AF2_OWNER_LOGIN
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Mint repository-scoped App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.AF2_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AF2_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Revert merge, push branch, and enable auto-merge
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          MERGE_SHA_INPUT: ${{ inputs.merge_sha }}
+          EXPECTED_REPOSITORY: affcomp-labs/affcomp-factory-2-sandbox
+          EXPECTED_REPO_ID: ${{ vars.AF2_REPO_ID }}
+          EXPECTED_BOT_LOGIN: ${{ vars.AF2_BOT_LOGIN }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$EXPECTED_REPOSITORY"
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.id | tostring')" = "$EXPECTED_REPO_ID"
+          test "${APP_SLUG}[bot]" = "$EXPECTED_BOT_LOGIN"
+          merge_sha="$(printf '%s' "$MERGE_SHA_INPUT" | tr '[:upper:]' '[:lower:]')"
+          [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]
+          default_branch="$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)"
+          git fetch --no-tags origin "$default_branch"
+          git cat-file -e "$merge_sha^{commit}"
+          git merge-base --is-ancestor "$merge_sha" "origin/$default_branch"
+          source_pr="$(gh api "repos/$GITHUB_REPOSITORY/commits/$merge_sha/pulls" | jq -c --arg sha "$merge_sha" '[.[] | select(.merged_at != null and .merge_commit_sha == $sha)][0] // empty')"
+          test -n "$source_pr"
+          test "$(echo "$source_pr" | jq -r '.user.login')" = "$EXPECTED_BOT_LOGIN"
+          echo "$source_pr" | jq -e '[.labels[].name] | index("af2:auto") != null' >/dev/null
+          source_pr_number="$(echo "$source_pr" | jq -r '.number | tostring')"
+          short_sha="${merge_sha:0:12}"
+          branch="af2/revert-$short_sha"
+          if git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1; then
+            existing_pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json number --jq '.[0].number // empty')"
+            if [ -n "$existing_pr" ]; then
+              echo "Revert branch and PR #$existing_pr already exist; resuming by enabling squash auto-merge."
+              gh pr merge "$existing_pr" --repo "$GITHUB_REPOSITORY" --auto --squash
+              exit 0
+            fi
+            echo "Revert branch exists without an open PR; refuse an ambiguous repeat." >&2
+            exit 1
+          fi
+          git switch -c "$branch" "origin/$default_branch"
+          bot_id="$(gh api "users/${APP_SLUG}[bot]" --jq '.id | tostring')"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          git revert --no-edit "$merge_sha"
+          revert_sha="$(git rev-parse HEAD)"
+          test -z "$(git status --porcelain)"
+          git push --set-upstream origin "$branch"
+          body="$(cat <<EOF
+          Reverts autonomous PR #$source_pr_number at squash merge $merge_sha.
+
+          Revert commit: $revert_sha
+          Requested by: $GITHUB_ACTOR
+          Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+          )"
+          if ! gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$default_branch" \
+              --head "$branch" \
+              --title "Revert AF2 PR #$source_pr_number ($short_sha)" \
+              --body "$body"; then
+            echo "PR creation failed; deleting $branch so the dispatch can be retried." >&2
+            git push origin --delete "$branch" || echo "Branch deletion also failed; delete $branch by hand before retrying." >&2
+            exit 1
+          fi
+          pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json number --jq '.[0].number // empty')"
+          test -n "$pr"
+          if ! gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" --auto --squash; then
+            echo "Revert PR #$pr exists but enabling auto-merge failed; enable it or merge by hand." >&2
+            exit 1
+          fi
