@@ -202,15 +202,22 @@ jobs:
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
 
       - name: Delete rejected branch and block issue
-        if: steps.guard.outcome == 'failure'
+        if: always() && steps.facts.outcome == 'success' && steps.guard.outcome != 'success'
         shell: bash
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BRANCH: ${{ steps.facts.outputs.target_branch }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          METRICS_OUTCOME: ${{ steps.metrics.outcome }}
+          GUARD_OUTCOME: ${{ steps.guard.outcome }}
         run: |
           set -uo pipefail
-          reason="$(cat "$RUNNER_TEMP/af2-guard-error.txt" 2>/dev/null || printf '%s' 'Branch or path guard failed.')"
+          if [ -f "$RUNNER_TEMP/af2-guard-error.txt" ]; then
+            reason="$(cat "$RUNNER_TEMP/af2-guard-error.txt")"
+          else
+            reason="Upstream step did not succeed (claude=$CLAUDE_OUTCOME, metrics=$METRICS_OUTCOME, guard=$GUARD_OUTCOME); the run failed, was cancelled, or timed out before the guard ran."
+          fi
           branch_cleanup="already absent"
           git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null 2>&1
           remote_status=$?
@@ -302,7 +309,11 @@ jobs:
             echo "No open PR owns the failed CI head; no repair scheduled."
             exit 0
           fi
-          pr_data="$(gh pr view "$pr" --repo "$GITHUB_REPOSITORY" --json headRefName,headRepository,labels)"
+          pr_data="$(gh pr view "$pr" --repo "$GITHUB_REPOSITORY" --json headRefName,headRefOid,headRepository,labels)"
+          if [ "$(echo "$pr_data" | jq -r '.headRefOid')" != "$HEAD_SHA" ]; then
+            echo "PR #$pr head has moved past $HEAD_SHA; stale CI failure ignored."
+            exit 0
+          fi
           labels="$(echo "$pr_data" | jq -c '[.labels[].name]')"
           if ! echo "$labels" | jq -e 'index("af2:auto") != null' >/dev/null; then
             echo "PR #$pr is not an AF2 autonomous PR; no repair scheduled."
@@ -435,6 +446,7 @@ jobs:
             --allowedTools "Bash(python -m unittest *),Bash(python -m pytest *),Bash(git status *),Bash(git diff *),Bash(git branch *),Bash(git rev-parse *),Bash(git add *),Bash(git commit *),Bash(git push *)"
 
       - name: Recheck remote branch, record metrics, and clear repair label
+        id: recheck
         shell: bash
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -469,3 +481,19 @@ jobs:
           attempt="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name | select(startswith("af2:attempt-"))][0]')"
           gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label af2:repair
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "AF2 $attempt repair pushed at $head_sha. Claude cost: $cost USD; turns: $turns; duration: $duration ms. Waiting for required CI. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - name: Block PR after a failed repair
+        if: always() && steps.app-token.outcome == 'success' && (steps.claude-repair.outcome != 'success' || steps.recheck.outcome != 'success')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          FACTS_OUTCOME: ${{ steps.facts.outcome }}
+          CLAUDE_OUTCOME: ${{ steps.claude-repair.outcome }}
+          RECHECK_OUTCOME: ${{ steps.recheck.outcome }}
+        run: |
+          set -uo pipefail
+          attempt="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name | select(startswith("af2:attempt-"))][0] // "af2:attempt-?"' 2>/dev/null || printf '%s' 'af2:attempt-?')"
+          gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label af2:repair --add-label af2:blocked || true
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "AF2 $attempt repair did not complete (facts=$FACTS_OUTCOME, claude=$CLAUDE_OUTCOME, recheck=$RECHECK_OUTCOME). PR blocked; owner recovery required. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
+          exit 1
