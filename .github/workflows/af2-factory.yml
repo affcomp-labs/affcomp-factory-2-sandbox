@@ -140,16 +140,16 @@ jobs:
             Allowed scope: src/**, tests/**, ordinary docs/** except docs/OPERATING.md, and README.md only.
             Out of scope: .github/**, FACTORY.md, docs/OPERATING.md, dependencies/bootstrap, credentials, permissions, releases, deployments, external systems, and every prior AffComp system.
             Acceptance tests: run the repository tests and add behavior-matched tests. Re-verify repository identity, base SHA, target branch, changed paths, and clean status before returning.
-            Limits: 45 workflow minutes, 12 turns, US$10, no subagents, no network fetches, and no more than one implementation attempt in this run.
+            Limits: 45 workflow minutes, 40 turns, US$10, no subagents, no network fetches, and no more than one implementation attempt in this run.
             Stop on identity mismatch, stale base, forbidden path, secret visibility, prior-system reference, ambiguous mutation, missing tests, or R2/R3 scope.
             Return evidence: repository and ID, base/target/commit SHAs, changed files, commands/results, cost, turns, and any blocker.
           claude_args: >-
             --model claude-sonnet-5
-            --max-turns 12
+            --max-turns 40
             --max-budget-usd 10.00
             --permission-mode acceptEdits
             --tools "Read,Write,Edit,Glob,Grep,Bash"
-            --allowedTools "Bash(python -m unittest *),Bash(python -m pytest *),Bash(git status *),Bash(git diff *),Bash(git branch *),Bash(git rev-parse *),Bash(git add *),Bash(git commit *),Bash(git push *)"
+            --allowedTools "Bash(python -m unittest *),Bash(python -m pytest *),Bash(python3 -m unittest *),Bash(python3 -m pytest *),Bash(git status *),Bash(git diff *),Bash(git branch *),Bash(git rev-parse *),Bash(git log *),Bash(git remote *),Bash(git add *),Bash(git commit *),Bash(git push *)"
 
       - name: Capture bounded execution metrics
         id: metrics
@@ -220,8 +220,11 @@ jobs:
             reason="Upstream step did not succeed (claude=$CLAUDE_OUTCOME, metrics=$METRICS_OUTCOME, guard=$GUARD_OUTCOME); the run failed, was cancelled, or timed out before the guard ran."
           fi
           branch_cleanup="already absent"
-          git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null 2>&1
-          remote_status=$?
+          if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null 2>&1; then
+            remote_status=0
+          else
+            remote_status=$?
+          fi
           if [ "$remote_status" -eq 0 ]; then
             if git push origin --delete "$BRANCH"; then
               branch_cleanup="deleted and read back absent"
@@ -518,17 +521,17 @@ jobs:
             Authority: inspect /tmp/af2-ci-failure.log, edit only src/**, tests/**, ordinary docs/** except docs/OPERATING.md, or README.md, run tests, commit, and push this same branch. No PR/merge/settings/deployment authority.
             Objective: identify the deterministic CI failure, make the smallest root-cause fix, and preserve issue acceptance criteria.
             Out of scope: .github/**, FACTORY.md, docs/OPERATING.md, dependencies/bootstrap, secrets, permissions, releases, deployments, external systems, and prior AffComp systems.
-            Limits: 30 minutes, 8 turns, US$5, no subagents/network, one repair attempt in this run.
+            Limits: 30 minutes, 25 turns, US$5, no subagents/network, one repair attempt in this run.
             Stop on identity mismatch, forbidden path, secret visibility, ambiguous state, or inability to reproduce.
             Return exact commands/results, changed files, prior/new SHAs, cost, turns, and blocker if any.
           claude_args: >-
             --model claude-sonnet-5
-            --max-turns 8
+            --max-turns 25
             --max-budget-usd 5.00
             --permission-mode acceptEdits
             --add-dir /tmp
             --tools "Read,Write,Edit,Glob,Grep,Bash"
-            --allowedTools "Bash(python -m unittest *),Bash(python -m pytest *),Bash(git status *),Bash(git diff *),Bash(git branch *),Bash(git rev-parse *),Bash(git add *),Bash(git commit *),Bash(git push *)"
+            --allowedTools "Bash(python -m unittest *),Bash(python -m pytest *),Bash(python3 -m unittest *),Bash(python3 -m pytest *),Bash(git status *),Bash(git diff *),Bash(git branch *),Bash(git rev-parse *),Bash(git log *),Bash(git remote *),Bash(git add *),Bash(git commit *),Bash(git push *)"
 
       - name: Recheck remote branch, record metrics, and clear repair label
         id: recheck
