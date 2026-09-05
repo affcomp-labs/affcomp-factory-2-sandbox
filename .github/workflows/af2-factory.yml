@@ -1,0 +1,471 @@
+name: AF2 Factory
+
+on:
+  issues:
+    types: [labeled]
+  pull_request:
+    types: [labeled]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  issues: read
+  pull-requests: read
+
+env:
+  AF2_EXPECTED_REPOSITORY: affcomp-labs/affcomp-factory-2-sandbox
+
+jobs:
+  start:
+    name: Start bounded issue
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'af2:ready' &&
+      github.event.sender.login == vars.AF2_OWNER_LOGIN &&
+      github.event.issue.user.login == vars.AF2_OWNER_LOGIN &&
+      ((contains(join(github.event.issue.labels.*.name, ','), 'af2:r0') &&
+        !contains(join(github.event.issue.labels.*.name, ','), 'af2:r1')) ||
+       (contains(join(github.event.issue.labels.*.name, ','), 'af2:r1') &&
+        !contains(join(github.event.issue.labels.*.name, ','), 'af2:r0')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: af2-start
+      cancel-in-progress: false
+    steps:
+      - name: Mint repository-scoped App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.AF2_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AF2_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Checkout exact default-branch head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Resolve and verify live identity
+        id: facts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          EXPECTED_REPO_ID: ${{ vars.AF2_REPO_ID }}
+          EXPECTED_BOT_LOGIN: ${{ vars.AF2_BOT_LOGIN }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$AF2_EXPECTED_REPOSITORY"
+          test -n "$EXPECTED_BOT_LOGIN"
+          test "${APP_SLUG}[bot]" = "$EXPECTED_BOT_LOGIN"
+          repo_id="$(gh api "repos/$GITHUB_REPOSITORY" --jq '.id | tostring')"
+          test -n "$EXPECTED_REPO_ID"
+          test "$repo_id" = "$EXPECTED_REPO_ID"
+          default_branch="$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)"
+          git fetch --no-tags origin "$default_branch"
+          base_sha="$(git rev-parse "origin/$default_branch")"
+          test "$(git rev-parse HEAD)" = "$base_sha"
+          target_branch="af2/issue-$ISSUE_NUMBER"
+          if git ls-remote --exit-code origin "refs/heads/$target_branch" >/dev/null 2>&1; then
+            echo "Target branch already exists; refuse an ambiguous repeat." >&2
+            exit 1
+          fi
+          {
+            echo "repo_id=$repo_id"
+            echo "default_branch=$default_branch"
+            echo "base_sha=$base_sha"
+            echo "target_branch=$target_branch"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create exact target branch
+        shell: bash
+        env:
+          TARGET_BRANCH: ${{ steps.facts.outputs.target_branch }}
+          BASE_SHA: ${{ steps.facts.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          target_branch="$TARGET_BRANCH"
+          git switch -c "$target_branch"
+          test "$(git branch --show-current)" = "$target_branch"
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+
+      - name: Implement, test, commit, and push
+        id: claude
+        env:
+          CLAUDE_BRANCH: ${{ steps.facts.outputs.target_branch }}
+        uses: anthropics/claude-code-action@fa2b2666b747000bf42767d1f332065b375e3c8f # v1.0.214; Claude Code 2.1.259
+        with:
+          github_token: ${{ steps.app-token.outputs.token }}
+          claude_code_oauth_token: ${{ secrets.AF2_CLAUDE_CODE_OAUTH_TOKEN }}
+          display_report: false
+          show_full_output: false
+          base_branch: ${{ steps.facts.outputs.default_branch }}
+          settings: |
+            {
+              "permissions": {
+                "deny": [
+                  "Read(.env*)", "Read(**/.env*)",
+                  "Edit(.github/**)", "Write(.github/**)",
+                  "Edit(FACTORY.md)", "Write(FACTORY.md)",
+                  "Edit(docs/OPERATING.md)", "Write(docs/OPERATING.md)",
+                  "Bash(gh *)", "Bash(curl *)", "Bash(wget *)"
+                ]
+              }
+            }
+          prompt: |
+            Factory version: AffComp AI Factory 2.0.
+            Repository: ${{ github.repository }}.
+            Repository ID: ${{ steps.facts.outputs.repo_id }}.
+            Local path: $GITHUB_WORKSPACE on an ephemeral GitHub-hosted runner.
+            Base branch: ${{ steps.facts.outputs.default_branch }}.
+            Exact live base SHA: ${{ steps.facts.outputs.base_sha }}.
+            Target branch: ${{ steps.facts.outputs.target_branch }}.
+            Work item: GitHub issue #${{ github.event.issue.number }} — ${{ github.event.issue.title }}.
+            Task class/risk: ordinary bounded ${{ contains(join(github.event.issue.labels.*.name, ','), 'af2:r1') && 'R1' || 'R0' }} work.
+            Model: claude-sonnet-5; standard coding model for ordinary implementation.
+            Authority: edit allowed paths, test, commit, and push the existing target branch. Do not create another branch, open or merge a PR, change settings, deploy, release, or modify factory controls.
+            Objective and acceptance criteria follow.
+
+            ${{ github.event.issue.body }}
+
+            Allowed scope: src/**, tests/**, ordinary docs/** except docs/OPERATING.md, and README.md only.
+            Out of scope: .github/**, FACTORY.md, docs/OPERATING.md, dependencies/bootstrap, credentials, permissions, releases, deployments, external systems, and every prior AffComp system.
+            Acceptance tests: run the repository tests and add behavior-matched tests. Re-verify repository identity, base SHA, target branch, changed paths, and clean status before returning.
+            Limits: 45 workflow minutes, 12 turns, US$10, no subagents, no network fetches, and no more than one implementation attempt in this run.
+            Stop on identity mismatch, stale base, forbidden path, secret visibility, prior-system reference, ambiguous mutation, missing tests, or R2/R3 scope.
+            Return evidence: repository and ID, base/target/commit SHAs, changed files, commands/results, cost, turns, and any blocker.
+          claude_args: >-
+            --model claude-sonnet-5
+            --max-turns 12
+            --max-budget-usd 10.00
+            --permission-mode acceptEdits
+            --tools "Read,Write,Edit,Glob,Grep,Bash"
+            --allowedTools "Bash(python -m unittest *),Bash(python -m pytest *),Bash(git status *),Bash(git diff *),Bash(git branch *),Bash(git rev-parse *),Bash(git add *),Bash(git commit *),Bash(git push *)"
+
+      - name: Capture bounded execution metrics
+        id: metrics
+        shell: bash
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          set -euo pipefail
+          test -f "$EXECUTION_FILE"
+          result="$(jq -c '[.[] | select(.type == "result")] | last' "$EXECUTION_FILE")"
+          test "$result" != "null"
+          echo "$result" | jq -e '
+            (.total_cost_usd | type == "number") and
+            (.num_turns | type == "number") and
+            (.duration_ms | type == "number")
+          ' >/dev/null
+          {
+            echo "cost_usd=$(echo "$result" | jq -r '.total_cost_usd | tostring')"
+            echo "turns=$(echo "$result" | jq -r '.num_turns | tostring')"
+            echo "duration_ms=$(echo "$result" | jq -r '.duration_ms | tostring')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Enforce branch and path boundary
+        id: guard
+        continue-on-error: true
+        shell: bash
+        env:
+          BRANCH: ${{ steps.facts.outputs.target_branch }}
+          BASE_SHA: ${{ steps.facts.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          fail_guard() {
+            printf '%s\n' "$1" | tee "$RUNNER_TEMP/af2-guard-error.txt" >&2
+            exit 1
+          }
+          test "$(git branch --show-current)" = "$BRANCH" || fail_guard "Claude left the expected target branch."
+          git fetch --no-tags origin "$BRANCH" || fail_guard "Expected pushed branch is absent or unreadable."
+          head_sha="$(git rev-parse "origin/$BRANCH")"
+          test "$head_sha" != "$BASE_SHA" || fail_guard "No pushed change exists on the target branch."
+          mapfile -d '' -t changed_paths < <(git diff --name-only -z "$BASE_SHA...$head_sha")
+          test "${#changed_paths[@]}" -gt 0 || fail_guard "The pushed branch has no changed paths."
+          : > "$RUNNER_TEMP/af2-changed-paths.txt"
+          for path in "${changed_paths[@]}"; do
+            printf '%q\n' "$path" >> "$RUNNER_TEMP/af2-changed-paths.txt"
+            case "$path" in
+              README.md|src/*|tests/*|docs/*) ;;
+              *) fail_guard "Forbidden R0/R1 path: $path" ;;
+            esac
+          done
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Delete rejected branch and block issue
+        if: steps.guard.outcome == 'failure'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ steps.facts.outputs.target_branch }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -uo pipefail
+          reason="$(cat "$RUNNER_TEMP/af2-guard-error.txt" 2>/dev/null || printf '%s' 'Branch or path guard failed.')"
+          branch_cleanup="already absent"
+          git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null 2>&1
+          remote_status=$?
+          if [ "$remote_status" -eq 0 ]; then
+            if git push origin --delete "$BRANCH"; then
+              branch_cleanup="deleted and read back absent"
+            else
+              branch_cleanup="deletion failed"
+            fi
+          elif [ "$remote_status" -ne 2 ]; then
+            branch_cleanup="remote state unreadable"
+          fi
+          if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null 2>&1; then
+            branch_cleanup="still present after deletion attempt"
+          fi
+          gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label af2:ready --add-label af2:blocked || true
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "AF2 blocked before PR creation. Guard: $reason Branch cleanup: $branch_cleanup. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
+          exit 1
+
+      - name: Open PR and enable native squash auto-merge
+        if: steps.guard.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ steps.facts.outputs.target_branch }}
+          BASE: ${{ steps.facts.outputs.default_branch }}
+          BASE_SHA: ${{ steps.facts.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.guard.outputs.head_sha }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          set -euo pipefail
+          pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [ -z "$pr" ]; then
+            body="$(cat <<EOF
+          Closes #$ISSUE_NUMBER
+
+          Base: $BASE_SHA
+          Head: $HEAD_SHA
+          Attempt: 1 of 3
+          Claude cost: ${{ steps.metrics.outputs.cost_usd }} USD
+          Claude turns: ${{ steps.metrics.outputs.turns }}
+          Claude duration: ${{ steps.metrics.outputs.duration_ms }} ms
+          Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+          )"
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$BASE" \
+              --head "$BRANCH" \
+              --title "AF2 #$ISSUE_NUMBER: $ISSUE_TITLE" \
+              --body "$body"
+            pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number --jq '.[0].number')"
+          fi
+          gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --add-label af2:auto --add-label af2:attempt-1
+          gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" --auto --squash
+          gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label af2:ready --add-label af2:running
+
+  schedule-repair:
+    name: Schedule bounded repair
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Mint repository-scoped App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.AF2_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AF2_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Find trusted PR and request next attempt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$AF2_EXPECTED_REPOSITORY"
+          pr="$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls" --jq '[.[] | select(.state == "open")][0].number // empty')"
+          if [ -z "$pr" ]; then
+            echo "No open PR owns the failed CI head; no repair scheduled."
+            exit 0
+          fi
+          pr_data="$(gh pr view "$pr" --repo "$GITHUB_REPOSITORY" --json headRefName,headRepository,labels)"
+          labels="$(echo "$pr_data" | jq -c '[.labels[].name]')"
+          if ! echo "$labels" | jq -e 'index("af2:auto") != null' >/dev/null; then
+            echo "PR #$pr is not an AF2 autonomous PR; no repair scheduled."
+            exit 0
+          fi
+          test "$(echo "$pr_data" | jq -r '.headRepository.nameWithOwner')" = "$GITHUB_REPOSITORY"
+          case "$(echo "$pr_data" | jq -r '.headRefName')" in
+            af2/issue-*) ;;
+            *) echo "AF2 auto label is on an unexpected branch; refuse repair." >&2; exit 1 ;;
+          esac
+          current="$(echo "$labels" | jq -r '[.[] | select(startswith("af2:attempt-"))][0] // "af2:attempt-1"' | sed 's/.*-//')"
+          case "$current" in 1|2|3) ;; *) exit 1 ;; esac
+          if [ "$current" -ge 3 ]; then
+            gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --add-label af2:blocked
+            gh pr comment "$pr" --repo "$GITHUB_REPOSITORY" --body "AF2 stopped after three total attempts. Owner recovery required."
+            exit 0
+          fi
+          next=$((current + 1))
+          gh pr edit "$pr" \
+            --repo "$GITHUB_REPOSITORY" \
+            --remove-label "af2:attempt-$current" \
+            --add-label "af2:attempt-$next" \
+            --add-label af2:repair
+
+  repair:
+    name: Repair failed CI on the same PR branch
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'af2:repair' &&
+      github.event.sender.login == vars.AF2_BOT_LOGIN &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(join(github.event.pull_request.labels.*.name, ','), 'af2:auto')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: af2-repair-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      - name: Mint repository-scoped App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.AF2_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AF2_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Checkout trusted PR branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Verify identity and capture failed CI evidence
+        id: facts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_REPO_ID: ${{ vars.AF2_REPO_ID }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$AF2_EXPECTED_REPOSITORY"
+          repo_id="$(gh api "repos/$GITHUB_REPOSITORY" --jq '.id | tostring')"
+          test -n "$EXPECTED_REPO_ID"
+          test "$repo_id" = "$EXPECTED_REPO_ID"
+          case "$HEAD_BRANCH" in af2/issue-*) ;; *) exit 1 ;; esac
+          git fetch --no-tags origin "$BASE_BRANCH" "$HEAD_BRANCH"
+          base_sha="$(git rev-parse "origin/$BASE_BRANCH")"
+          head_sha="$(git rev-parse "origin/$HEAD_BRANCH")"
+          test "$(git rev-parse HEAD)" = "$head_sha"
+          run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow CI --branch "$HEAD_BRANCH" --status failure --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+          test -n "$run_id"
+          gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --log-failed > /tmp/af2-ci-failure.log
+          {
+            echo "repo_id=$repo_id"
+            echo "base_sha=$base_sha"
+            echo "head_sha=$head_sha"
+            echo "run_id=$run_id"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Repair and push
+        id: claude-repair
+        env:
+          CLAUDE_BRANCH: ${{ github.event.pull_request.head.ref }}
+        uses: anthropics/claude-code-action@fa2b2666b747000bf42767d1f332065b375e3c8f # v1.0.214; Claude Code 2.1.259
+        with:
+          github_token: ${{ steps.app-token.outputs.token }}
+          claude_code_oauth_token: ${{ secrets.AF2_CLAUDE_CODE_OAUTH_TOKEN }}
+          display_report: false
+          show_full_output: false
+          allowed_bots: ${{ vars.AF2_BOT_LOGIN }}
+          settings: |
+            {
+              "permissions": {
+                "deny": [
+                  "Read(.env*)", "Read(**/.env*)",
+                  "Edit(.github/**)", "Write(.github/**)",
+                  "Edit(FACTORY.md)", "Write(FACTORY.md)",
+                  "Edit(docs/OPERATING.md)", "Write(docs/OPERATING.md)",
+                  "Bash(gh *)", "Bash(curl *)", "Bash(wget *)"
+                ]
+              }
+            }
+          prompt: |
+            Factory version: AffComp AI Factory 2.0.
+            Repository: ${{ github.repository }}; repository ID: ${{ steps.facts.outputs.repo_id }}.
+            Local path: $GITHUB_WORKSPACE on an ephemeral GitHub-hosted runner.
+            Base branch and exact base SHA: ${{ github.event.pull_request.base.ref }} at ${{ steps.facts.outputs.base_sha }}.
+            Target branch and current head: ${{ github.event.pull_request.head.ref }} at ${{ steps.facts.outputs.head_sha }}.
+            Work item: repair CI for PR #${{ github.event.pull_request.number }}; failed run ${{ steps.facts.outputs.run_id }}.
+            Task/risk: bounded R0/R1 CI remediation. Model: claude-sonnet-5.
+            Authority: inspect /tmp/af2-ci-failure.log, edit only src/**, tests/**, ordinary docs/** except docs/OPERATING.md, or README.md, run tests, commit, and push this same branch. No PR/merge/settings/deployment authority.
+            Objective: identify the deterministic CI failure, make the smallest root-cause fix, and preserve issue acceptance criteria.
+            Out of scope: .github/**, FACTORY.md, docs/OPERATING.md, dependencies/bootstrap, secrets, permissions, releases, deployments, external systems, and prior AffComp systems.
+            Limits: 30 minutes, 8 turns, US$5, no subagents/network, one repair attempt in this run.
+            Stop on identity mismatch, forbidden path, secret visibility, ambiguous state, or inability to reproduce.
+            Return exact commands/results, changed files, prior/new SHAs, cost, turns, and blocker if any.
+          claude_args: >-
+            --model claude-sonnet-5
+            --max-turns 8
+            --max-budget-usd 5.00
+            --permission-mode acceptEdits
+            --add-dir /tmp
+            --tools "Read,Write,Edit,Glob,Grep,Bash"
+            --allowedTools "Bash(python -m unittest *),Bash(python -m pytest *),Bash(git status *),Bash(git diff *),Bash(git branch *),Bash(git rev-parse *),Bash(git add *),Bash(git commit *),Bash(git push *)"
+
+      - name: Recheck remote branch, record metrics, and clear repair label
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BASE_SHA: ${{ steps.facts.outputs.base_sha }}
+          PRIOR_HEAD_SHA: ${{ steps.facts.outputs.head_sha }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXECUTION_FILE: ${{ steps.claude-repair.outputs.execution_file }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BRANCH"
+          head_sha="$(git rev-parse "origin/$BRANCH")"
+          test "$head_sha" != "$PRIOR_HEAD_SHA"
+          mapfile -d '' -t changed_paths < <(git diff --name-only -z "$BASE_SHA...$head_sha")
+          test "${#changed_paths[@]}" -gt 0
+          for path in "${changed_paths[@]}"; do
+            case "$path" in
+              README.md|src/*|tests/*|docs/*) ;;
+              *) echo "Forbidden R0/R1 path: $path" >&2; exit 1 ;;
+            esac
+          done
+          test -f "$EXECUTION_FILE"
+          result="$(jq -c '[.[] | select(.type == "result")] | last' "$EXECUTION_FILE")"
+          echo "$result" | jq -e '
+            (.total_cost_usd | type == "number") and
+            (.num_turns | type == "number") and
+            (.duration_ms | type == "number")
+          ' >/dev/null
+          cost="$(echo "$result" | jq -r '.total_cost_usd | tostring')"
+          turns="$(echo "$result" | jq -r '.num_turns | tostring')"
+          duration="$(echo "$result" | jq -r '.duration_ms | tostring')"
+          attempt="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name | select(startswith("af2:attempt-"))][0]')"
+          gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label af2:repair
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "AF2 $attempt repair pushed at $head_sha. Claude cost: $cost USD; turns: $turns; duration: $duration ms. Waiting for required CI. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

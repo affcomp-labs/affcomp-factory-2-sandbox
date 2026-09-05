@@ -1,0 +1,5 @@
+# Documentation only; the ruleset does not require Code Owner approval.
+/.github/ @Tearoom12026
+/.github/CODEOWNERS @Tearoom12026
+/FACTORY.md @Tearoom12026
+/docs/OPERATING.md @Tearoom12026
