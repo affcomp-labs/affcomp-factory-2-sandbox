@@ -301,12 +301,59 @@ jobs:
           gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "AF2 blocked after PR setup failure (open-pr=$OPEN_PR_OUTCOME). $branch_note. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
           exit 1
 
+  cleanup-start:
+    name: Clean up after a failed, cancelled, or timed-out start
+    needs: start
+    if: always() && github.event_name == 'issues' && needs.start.result != 'success' && needs.start.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Mint repository-scoped App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.AF2_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AF2_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Reconcile branch, PR, and issue state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          START_RESULT: ${{ needs.start.result }}
+        run: |
+          set -uo pipefail
+          test "$GITHUB_REPOSITORY" = "$AF2_EXPECTED_REPOSITORY" || exit 1
+          branch="af2/issue-$ISSUE_NUMBER"
+          pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+          if [ -n "$pr" ]; then
+            gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" --disable-auto || true
+            gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --add-label af2:blocked || true
+            note="PR #$pr left open with auto-merge disabled"
+          elif gh api "repos/$GITHUB_REPOSITORY/branches/$branch" >/dev/null 2>&1; then
+            if gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" >/dev/null; then note="orphan branch $branch deleted"; else note="orphan branch $branch could not be deleted"; fi
+          else
+            note="no branch or PR to clean up"
+          fi
+          labels="$(gh issue view "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name]' 2>/dev/null || echo '[]')"
+          if echo "$labels" | jq -e 'index("af2:blocked") != null' >/dev/null; then
+            echo "Issue #$ISSUE_NUMBER already blocked by the in-job handler; $note."
+            exit 0
+          fi
+          gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label af2:ready --remove-label af2:running --add-label af2:blocked || true
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "AF2 start job ended with result '$START_RESULT' before its own cleanup could run (failed, cancelled, or timed out). $note. Owner recovery required. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
+
   schedule-repair:
     name: Schedule bounded repair
     if: >-
       github.event_name == 'workflow_run' &&
       github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion == 'failure' &&
+      (github.event.workflow_run.conclusion == 'failure' ||
+       github.event.workflow_run.conclusion == 'timed_out' ||
+       github.event.workflow_run.conclusion == 'cancelled') &&
       github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -326,6 +373,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "$AF2_EXPECTED_REPOSITORY"
@@ -353,6 +401,12 @@ jobs:
             af2/issue-*) ;;
             *) echo "AF2 auto label is on an unexpected branch; refuse repair." >&2; exit 1 ;;
           esac
+          if [ "$CI_CONCLUSION" != "failure" ]; then
+            gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" --disable-auto || true
+            gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --add-label af2:blocked
+            gh pr comment "$pr" --repo "$GITHUB_REPOSITORY" --body "AF2 CI ended with conclusion '$CI_CONCLUSION' (not a deterministic failure). Auto-merge disabled; PR blocked; owner recovery required. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            exit 0
+          fi
           current="$(echo "$labels" | jq -r '[.[] | select(startswith("af2:attempt-"))][0] // "af2:attempt-1"' | sed 's/.*-//')"
           case "$current" in 1|2|3) ;; *) exit 1 ;; esac
           if [ "$current" -ge 3 ]; then

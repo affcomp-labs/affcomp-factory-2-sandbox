@@ -62,7 +62,13 @@ jobs:
           short_sha="${merge_sha:0:12}"
           branch="af2/revert-$short_sha"
           if git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1; then
-            echo "Revert branch already exists; refuse an ambiguous repeat." >&2
+            existing_pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json number --jq '.[0].number // empty')"
+            if [ -n "$existing_pr" ]; then
+              echo "Revert branch and PR #$existing_pr already exist; resuming by enabling squash auto-merge."
+              gh pr merge "$existing_pr" --repo "$GITHUB_REPOSITORY" --auto --squash
+              exit 0
+            fi
+            echo "Revert branch exists without an open PR; refuse an ambiguous repeat." >&2
             exit 1
           fi
           git switch -c "$branch" "origin/$default_branch"
