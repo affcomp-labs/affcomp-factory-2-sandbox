@@ -4,7 +4,7 @@ import unittest
 
 class PythonVersionTests(unittest.TestCase):
     def test_supported_python_version(self) -> None:
-        self.assertEqual(sys.version_info[:2], (3, 12))
+        self.assertEqual(sys.version_info[:2], (3, 14))
 
 
 if __name__ == "__main__":
