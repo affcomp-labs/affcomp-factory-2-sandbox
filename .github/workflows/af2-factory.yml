@@ -238,6 +238,7 @@ jobs:
           exit 1
 
       - name: Open PR and enable native squash auto-merge
+        id: open-pr
         if: steps.guard.outcome == 'success'
         shell: bash
         env:
@@ -275,6 +276,29 @@ jobs:
           gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --add-label af2:auto --add-label af2:attempt-1
           gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" --auto --squash
           gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label af2:ready --add-label af2:running
+
+      - name: Block issue after a failed PR setup
+        if: always() && steps.facts.outcome == 'success' && steps.guard.outcome == 'success' && steps.open-pr.outcome != 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ steps.facts.outputs.target_branch }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          OPEN_PR_OUTCOME: ${{ steps.open-pr.outcome }}
+        run: |
+          set -uo pipefail
+          pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+          if [ -n "$pr" ]; then
+            gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" --disable-auto || true
+            gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --add-label af2:blocked || true
+            gh pr comment "$pr" --repo "$GITHUB_REPOSITORY" --body "AF2 PR setup did not complete (open-pr=$OPEN_PR_OUTCOME). Auto-merge disabled; owner recovery required. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
+            branch_note="PR #$pr left open with auto-merge disabled"
+          else
+            if git push origin --delete "$BRANCH"; then branch_note="branch $BRANCH deleted"; else branch_note="branch $BRANCH deletion failed"; fi
+          fi
+          gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label af2:ready --remove-label af2:running --add-label af2:blocked || true
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "AF2 blocked after PR setup failure (open-pr=$OPEN_PR_OUTCOME). $branch_note. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
+          exit 1
 
   schedule-repair:
     name: Schedule bounded repair
@@ -327,8 +351,9 @@ jobs:
           current="$(echo "$labels" | jq -r '[.[] | select(startswith("af2:attempt-"))][0] // "af2:attempt-1"' | sed 's/.*-//')"
           case "$current" in 1|2|3) ;; *) exit 1 ;; esac
           if [ "$current" -ge 3 ]; then
+            gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" --disable-auto || true
             gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --add-label af2:blocked
-            gh pr comment "$pr" --repo "$GITHUB_REPOSITORY" --body "AF2 stopped after three total attempts. Owner recovery required."
+            gh pr comment "$pr" --repo "$GITHUB_REPOSITORY" --body "AF2 stopped after three total attempts. Auto-merge disabled. Owner recovery required."
             exit 0
           fi
           next=$((current + 1))
@@ -494,6 +519,7 @@ jobs:
         run: |
           set -uo pipefail
           attempt="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name | select(startswith("af2:attempt-"))][0] // "af2:attempt-?"' 2>/dev/null || printf '%s' 'af2:attempt-?')"
+          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --disable-auto || true
           gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label af2:repair --add-label af2:blocked || true
-          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "AF2 $attempt repair did not complete (facts=$FACTS_OUTCOME, claude=$CLAUDE_OUTCOME, recheck=$RECHECK_OUTCOME). PR blocked; owner recovery required. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "AF2 $attempt repair did not complete (facts=$FACTS_OUTCOME, claude=$CLAUDE_OUTCOME, recheck=$RECHECK_OUTCOME). Auto-merge disabled; PR blocked; owner recovery required. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
           exit 1

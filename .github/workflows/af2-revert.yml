@@ -81,11 +81,19 @@ jobs:
           Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           EOF
           )"
-          gh pr create \
-            --repo "$GITHUB_REPOSITORY" \
-            --base "$default_branch" \
-            --head "$branch" \
-            --title "Revert AF2 PR #$source_pr_number ($short_sha)" \
-            --body "$body"
-          pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json number --jq '.[0].number')"
-          gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" --auto --squash
+          if ! gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$default_branch" \
+              --head "$branch" \
+              --title "Revert AF2 PR #$source_pr_number ($short_sha)" \
+              --body "$body"; then
+            echo "PR creation failed; deleting $branch so the dispatch can be retried." >&2
+            git push origin --delete "$branch" || echo "Branch deletion also failed; delete $branch by hand before retrying." >&2
+            exit 1
+          fi
+          pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json number --jq '.[0].number // empty')"
+          test -n "$pr"
+          if ! gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" --auto --squash; then
+            echo "Revert PR #$pr exists but enabling auto-merge failed; enable it or merge by hand." >&2
+            exit 1
+          fi
