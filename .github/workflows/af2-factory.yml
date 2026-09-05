@@ -149,7 +149,7 @@ jobs:
             --max-budget-usd 10.00
             --permission-mode acceptEdits
             --tools "Read,Write,Edit,Glob,Grep,Bash"
-            --allowedTools "Bash(python -m unittest *),Bash(python -m pytest *),Bash(python3 -m unittest *),Bash(python3 -m pytest *),Bash(git status *),Bash(git diff *),Bash(git branch *),Bash(git rev-parse *),Bash(git log *),Bash(git remote *),Bash(git add *),Bash(git commit *),Bash(git push *)"
+            --allowedTools "Bash(python -m unittest *),Bash(python -m pytest *),Bash(python3 -m unittest *),Bash(python3 -m pytest *),Bash(git status *),Bash(git diff *),Bash(git branch *),Bash(git rev-parse *),Bash(git log *),Bash(git remote -v),Bash(git add *),Bash(git commit *),Bash(git push *)"
 
       - name: Capture bounded execution metrics
         id: metrics
@@ -531,7 +531,7 @@ jobs:
             --permission-mode acceptEdits
             --add-dir /tmp
             --tools "Read,Write,Edit,Glob,Grep,Bash"
-            --allowedTools "Bash(python -m unittest *),Bash(python -m pytest *),Bash(python3 -m unittest *),Bash(python3 -m pytest *),Bash(git status *),Bash(git diff *),Bash(git branch *),Bash(git rev-parse *),Bash(git log *),Bash(git remote *),Bash(git add *),Bash(git commit *),Bash(git push *)"
+            --allowedTools "Bash(python -m unittest *),Bash(python -m pytest *),Bash(python3 -m unittest *),Bash(python3 -m pytest *),Bash(git status *),Bash(git diff *),Bash(git branch *),Bash(git rev-parse *),Bash(git log *),Bash(git remote -v),Bash(git add *),Bash(git commit *),Bash(git push *)"
 
       - name: Recheck remote branch, record metrics, and clear repair label
         id: recheck
