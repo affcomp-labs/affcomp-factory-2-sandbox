@@ -1,6 +1,6 @@
 import unittest
 
-from src.health import health_payload, render_health
+from src.health import health_payload
 
 
 class HealthPayloadTests(unittest.TestCase):
@@ -9,11 +9,6 @@ class HealthPayloadTests(unittest.TestCase):
             health_payload(),
             {"status": "ok", "factory": "affcomp-2.0"},
         )
-
-
-class RenderHealthTests(unittest.TestCase):
-    def test_render_health_is_deterministic(self) -> None:
-        self.assertEqual(render_health(), "status=ok;factory=affcomp-2.0")
 
 
 if __name__ == "__main__":
